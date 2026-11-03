@@ -7,7 +7,8 @@ const {
   EmbedBuilder,
   SlashCommandBuilder,
   REST,
-  Routes
+  Routes,
+  PermissionFlagsBits
 } = require("discord.js");
 
 const fs = require("fs");
@@ -22,8 +23,8 @@ const client = new Client({
   ]
 });
 
-const SUZERAIN_ID = "1382832095394529361";
 const PREFIX = "?";
+const SUZERAIN_ID = "1382832095394529361";
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, "puppet-data.json");
 
 const COLORS = {
@@ -43,10 +44,14 @@ let data = {
   friendlies: {}
 };
 
+// DATA STORAGE
+
 function loadData() {
   try {
     if (fs.existsSync(DATA_FILE)) {
-      const saved = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+      const saved = JSON.parse(
+        fs.readFileSync(DATA_FILE, "utf8")
+      );
 
       data = {
         countries: saved.countries || {},
@@ -60,20 +65,24 @@ function loadData() {
 
 function saveData() {
   try {
-    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+    fs.mkdirSync(path.dirname(DATA_FILE), {
+      recursive: true
+    });
 
-    const tempFile = DATA_FILE + ".tmp";
+    const temp = DATA_FILE + ".tmp";
 
     fs.writeFileSync(
-      tempFile,
+      temp,
       JSON.stringify(data, null, 2)
     );
 
-    fs.renameSync(tempFile, DATA_FILE);
+    fs.renameSync(temp, DATA_FILE);
   } catch (error) {
     console.error("Data saving error:", error);
   }
 }
+
+// COUNTRIES
 
 function getCountryCode(userId) {
   return data.countries[userId] || null;
@@ -90,112 +99,119 @@ function getCountryName(code) {
 }
 
 function getFlag(code) {
-  if (!code || !/^[A-Z]{2}$/.test(code)) return "🏳️";
+  if (!code || !/^[A-Z]{2}$/.test(code)) {
+    return "🏳️";
+  }
 
   return String.fromCodePoint(
-    ...[...code].map(char => 127397 + char.charCodeAt(0))
+    ...[...code].map(char =>
+      127397 + char.charCodeAt(0)
+    )
   );
 }
 
 function getPlayerLabel(userId, position) {
-  const country = getCountryCode(userId);
-  const flag = country ? getFlag(country) : "🏳️";
+  const code = getCountryCode(userId);
+  const flag = getFlag(code);
 
   return `${flag} **${position}** — <@${userId}>`;
 }
 
-function extractMentions(input) {
-  return [...input.matchAll(/<@!?(\d+)>/g)].map(match => match[1]);
-}
+// PLAYER SELECTION
 
-function parseCustomPlayers(input) {
-  const parts = input
-    .split(/[\n,;]+/)
-    .map(part => part.trim())
-    .filter(Boolean);
-
+function collectPlayers(interaction, max, positionMode) {
   const players = [];
+  let gapFound = false;
 
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
+  for (let i = 1; i <= max; i++) {
+    const user = interaction.options.getUser(`player${i}`);
 
-    const match = part.match(
-      /^([A-Za-z0-9+/-]{1,10})\s*[:=-]\s*<@!?(\d+)>\s*$/
-    );
-
-    if (match) {
-      players.push({
-        position: match[1].toUpperCase(),
-        userId: match[2]
-      });
-
+    if (!user) {
+      gapFound = true;
       continue;
     }
 
-    const mentions = extractMentions(part);
-
-    if (mentions.length !== 1) {
+    if (gapFound) {
       throw new Error(
-        `Invalid player entry: ${part}. Use POSITION: @player`
+        `Player ${i} is selected while an earlier player slot is empty. Fill player slots in order.`
       );
     }
 
+    let position = `P${i}`;
+
+    if (positionMode) {
+      position =
+        interaction.options.getString(`position${i}`) ||
+        `P${i}`;
+
+      position = position.trim().toUpperCase();
+
+      if (!/^[A-Z0-9+/-]{1,10}$/.test(position)) {
+        throw new Error(`Invalid position for player ${i}.`);
+      }
+    }
+
     players.push({
-      position: `P${i + 1}`,
-      userId: mentions[0]
+      userId: user.id,
+      position
     });
   }
 
   const ids = players.map(player => player.userId);
 
   if (new Set(ids).size !== ids.length) {
-    throw new Error("You cannot put the same player in the lineup twice.");
+    throw new Error(
+      "You cannot select the same player twice."
+    );
   }
 
   return players;
 }
 
-function parseFriendlyPlayers(input, positions) {
-  const ids = extractMentions(input);
+function collectBench(interaction, max = 5) {
+  const bench = [];
 
-  if (ids.length !== positions.length) {
-    throw new Error(
-      `This formation requires exactly ${positions.length} players. You supplied ${ids.length}.`
-    );
+  for (let i = 1; i <= max; i++) {
+    const user = interaction.options.getUser(`bench${i}`);
+
+    if (user) {
+      bench.push(user.id);
+    }
   }
 
-  if (new Set(ids).size !== ids.length) {
-    throw new Error("You cannot put the same player in the lineup twice.");
+  if (new Set(bench).size !== bench.length) {
+    throw new Error("Duplicate substitutes are not allowed.");
   }
 
-  return positions.map((position, index) => ({
-    position,
-    userId: ids[index]
-  }));
+  return bench;
 }
 
 async function validatePlayers(guild, ids) {
-  const uniqueIds = [...new Set(ids)];
+  const unique = [...new Set(ids)];
 
   const members = await Promise.all(
-    uniqueIds.map(id =>
+    unique.map(id =>
       guild.members.fetch(id).catch(() => null)
     )
   );
 
-  const missing = uniqueIds.filter((id, index) => !members[index]);
+  const missing = unique.filter(
+    (id, index) => !members[index]
+  );
 
   if (missing.length) {
     throw new Error(
-      `These users are not members of this server: ${missing.map(id => `<@${id}>`).join(", ")}`
+      `These players are not in this server: ${missing.map(id => `<@${id}>`).join(", ")}`
     );
   }
-
-  return members;
 }
 
+// EMBEDS
+
 function getMentions(players) {
-  return players.map(player => `<@${player.userId}>`).join(" ");
+  return players
+    .map(player => `<@${player.userId}>`)
+    .join(" ");
 }
 
 function createLineupEmbed(formation, players, bench) {
@@ -208,43 +224,51 @@ function createLineupEmbed(formation, players, bench) {
     .setTitle(`✦ ${formation} Formation`)
     .setDescription(
       players.map(player =>
-        getPlayerLabel(player.userId, player.position)
+        getPlayerLabel(
+          player.userId,
+          player.position
+        )
       ).join("\n")
     )
-    .addFields({
-      name: "FORMATION",
-      value: `\`${formation}\``,
-      inline: true
-    }, {
-      name: "STARTING PLAYERS",
-      value: `\`${players.length}\``,
-      inline: true
-    })
+    .addFields(
+      {
+        name: "FORMATION",
+        value: `\`${formation}\``,
+        inline: true
+      },
+      {
+        name: "STARTING XI",
+        value: `\`${players.length}\``,
+        inline: true
+      }
+    )
     .setURL("https://www.buildlineup.com/")
     .setFooter({
-      text: "Puppet • BuildLineup squad generator"
+      text: "Puppet • BuildLineup Generator"
     })
     .setTimestamp();
 
   if (bench.length) {
     embed.addFields({
-      name: "SUBSTITUTES",
-      value: bench.map((id, index) =>
-        getPlayerLabel(id, `SUB ${index + 1}`)
+      name: `SUBSTITUTES • ${bench.length}`,
+      value: bench.map((id, i) =>
+        getPlayerLabel(id, `SUB ${i + 1}`)
       ).join("\n")
     });
   }
 
   embed.addFields({
     name: "BUILD YOUR VISUAL LINEUP",
-    value: "[Open BuildLineup](https://www.buildlineup.com/) • Recreate your formation using the listed players."
+    value: "[Open BuildLineup](https://www.buildlineup.com/)"
   });
 
   return embed;
 }
 
 function createFriendlyEmbed(friendly, guild) {
-  const positions = FRIENDLY_POSITIONS[friendly.format];
+  const shape = friendly.format === "8v8"
+    ? "2-2-3"
+    : "2-3-3";
 
   const embed = new EmbedBuilder()
     .setColor(COLORS.friendly)
@@ -252,30 +276,37 @@ function createFriendlyEmbed(friendly, guild) {
       name: "PUPPET • FRIENDLY MANAGER",
       iconURL: client.user.displayAvatarURL()
     })
-    .setTitle(`✦ ${friendly.format} Friendly Lineup`)
+    .setTitle(`✦ ${friendly.format} Friendly`)
     .setDescription(
       friendly.players.map(player =>
-        getPlayerLabel(player.userId, player.position)
+        getPlayerLabel(
+          player.userId,
+          player.position
+        )
       ).join("\n")
     )
     .addFields(
       {
         name: "FORMATION",
-        value: `\`${friendly.format === "8v8" ? "2-2-3" : "2-3-3"}\``,
+        value: `\`${shape}\``,
         inline: true
       },
       {
-        name: "PLAYERS",
-        value: `\`${friendly.players.length}/${positions.length}\``,
+        name: "STARTING PLAYERS",
+        value: `\`${friendly.players.length}/${friendly.players.length}\``,
         inline: true
+      },
+      {
+        name: "SUBSTITUTIONS",
+        value: "Use `/sub` to replace a player. The outgoing player moves to the bench."
       }
     );
 
   if (friendly.bench.length) {
     embed.addFields({
       name: `BENCH • ${friendly.bench.length}`,
-      value: friendly.bench.map((id, index) =>
-        getPlayerLabel(id, `SUB ${index + 1}`)
+      value: friendly.bench.map((id, i) =>
+        getPlayerLabel(id, `SUB ${i + 1}`)
       ).join("\n")
     });
   } else {
@@ -284,11 +315,6 @@ function createFriendlyEmbed(friendly, guild) {
       value: "No substitutes registered."
     });
   }
-
-  embed.addFields({
-    name: "SUBSTITUTIONS",
-    value: "Use `/sub` to replace a player. The outgoing player automatically moves to the bench."
-  });
 
   embed.setFooter({
     text: `${guild.name} • Puppet Friendly Manager`
@@ -299,122 +325,149 @@ function createFriendlyEmbed(friendly, guild) {
   return embed;
 }
 
-async function sendFriendly(interaction, friendly) {
-  const embed = createFriendlyEmbed(
-    friendly,
-    interaction.guild
+// SLASH COMMANDS
+
+const lineupCommand = new SlashCommandBuilder()
+  .setName("lineup")
+  .setDescription("Create and manage football lineups")
+
+  .addSubcommand(sub =>
+    sub
+      .setName("create")
+      .setDescription("Build a custom football lineup")
+
+      .addStringOption(option =>
+        option
+          .setName("formation")
+          .setDescription("Formation name, e.g. 4-3-3")
+          .setRequired(true)
+      )
+  )
+
+  .addSubcommand(sub =>
+    sub
+      .setName("setcountry")
+      .setDescription("Register your country")
+
+      .addStringOption(option =>
+        option
+          .setName("country")
+          .setDescription("Two-letter country code, e.g. PL, FR, MA")
+          .setRequired(true)
+      )
+  )
+
+  .addSubcommand(sub =>
+    sub
+      .setName("mycountry")
+      .setDescription("Check your registered country")
+
+      .addUserOption(option =>
+        option
+          .setName("player")
+          .setDescription("Player to check")
+      )
   );
 
-  await interaction.reply({
-    content: `**STARTING LINEUP**\n${getMentions(friendly.players)}`,
-    embeds: [embed],
-    allowedMentions: {
-      users: friendly.players.map(player => player.userId)
-    }
-  });
+// Add individual player and position selectors.
+
+const createSubcommand = lineupCommand.options.find(
+  option => option.name === "create"
+);
+
+for (let i = 1; i <= 11; i++) {
+  createSubcommand.addUserOption(option =>
+    option
+      .setName(`player${i}`)
+      .setDescription(`Starting player ${i}`)
+      .setRequired(i === 1)
+  );
 }
 
+for (let i = 1; i <= 11; i++) {
+  createSubcommand.addStringOption(option =>
+    option
+      .setName(`position${i}`)
+      .setDescription(`Position for player ${i}, e.g. ST, CB, GK`)
+      .setRequired(false)
+  );
+}
+
+createSubcommand.addStringOption(option =>
+  option
+    .setName("bench")
+    .setDescription("Optional substitute mentions separated by spaces")
+);
+
+// FRIENDLY COMMAND
+
+const friendlyCommand = new SlashCommandBuilder()
+  .setName("friendly")
+  .setDescription("Create an 8v8 or 9v9 friendly")
+
+  .addStringOption(option =>
+    option
+      .setName("format")
+      .setDescription("Friendly format")
+      .setRequired(true)
+      .addChoices(
+        { name: "8v8", value: "8v8" },
+        { name: "9v9", value: "9v9" }
+      )
+  );
+
+for (let i = 1; i <= 9; i++) {
+  friendlyCommand.addUserOption(option =>
+    option
+      .setName(`player${i}`)
+      .setDescription(`Starting player ${i}`)
+      .setRequired(i === 1)
+  );
+}
+
+for (let i = 1; i <= 5; i++) {
+  friendlyCommand.addUserOption(option =>
+    option
+      .setName(`bench${i}`)
+      .setDescription(`Substitute ${i}`)
+  );
+}
+
+// SUB COMMAND
+
+const subCommand = new SlashCommandBuilder()
+  .setName("sub")
+  .setDescription("Substitute a player in the active friendly")
+
+  .addUserOption(option =>
+    option
+      .setName("outgoing")
+      .setDescription("Player leaving the pitch")
+      .setRequired(true)
+  )
+
+  .addUserOption(option =>
+    option
+      .setName("incoming")
+      .setDescription("Player entering the pitch")
+      .setRequired(true)
+  );
+
 const commands = [
-  new SlashCommandBuilder()
-    .setName("lineup")
-    .setDescription("Create and manage football lineups")
-
-    .addSubcommand(sub =>
-      sub
-        .setName("create")
-        .setDescription("Generate a custom football lineup")
-        .addStringOption(option =>
-          option
-            .setName("formation")
-            .setDescription("Any formation, e.g. 4-3-3, 3-2-2")
-            .setRequired(true)
-        )
-        .addStringOption(option =>
-          option
-            .setName("players")
-            .setDescription("POSITION: @player, POSITION: @player")
-            .setRequired(true)
-        )
-        .addStringOption(option =>
-          option
-            .setName("bench")
-            .setDescription("Optional substitute mentions separated by commas")
-        )
-    )
-
-    .addSubcommand(sub =>
-      sub
-        .setName("setcountry")
-        .setDescription("Register your country")
-        .addStringOption(option =>
-          option
-            .setName("country")
-            .setDescription("Two-letter country code, e.g. PL, FR, MA, ZA")
-            .setRequired(true)
-        )
-    )
-
-    .addSubcommand(sub =>
-      sub
-        .setName("mycountry")
-        .setDescription("Check a registered country")
-        .addUserOption(option =>
-          option
-            .setName("player")
-            .setDescription("Player to check (optional)")
-        )
-    ),
-
-  new SlashCommandBuilder()
-    .setName("friendly")
-    .setDescription("Create an 8v8 or 9v9 friendly lineup")
-    .addStringOption(option =>
-      option
-        .setName("format")
-        .setDescription("Choose the match format")
-        .setRequired(true)
-        .addChoices(
-          { name: "8v8", value: "8v8" },
-          { name: "9v9", value: "9v9" }
-        )
-    )
-    .addStringOption(option =>
-      option
-        .setName("players")
-        .setDescription("Mention players in positional order, separated by commas")
-        .setRequired(true)
-    )
-    .addStringOption(option =>
-      option
-        .setName("bench")
-        .setDescription("Optional substitute mentions separated by commas")
-    ),
-
-  new SlashCommandBuilder()
-    .setName("sub")
-    .setDescription("Substitute a player in the active friendly lineup")
-    .addUserOption(option =>
-      option
-        .setName("outgoing")
-        .setDescription("Player leaving the pitch")
-        .setRequired(true)
-    )
-    .addUserOption(option =>
-      option
-        .setName("incoming")
-        .setDescription("Player entering the pitch")
-        .setRequired(true)
-    )
+  lineupCommand,
+  friendlyCommand,
+  subCommand
 ];
+
+// REGISTER COMMANDS
 
 client.once("ready", async () => {
   console.log(`Puppet is online as ${client.user.tag}`);
   console.log("Ready to serve.");
 
-  loadData();
-
-  const rest = new REST({ version: "10" })
-    .setToken(process.env.DISCORD_TOKEN);
+  const rest = new REST({
+    version: "10"
+  }).setToken(process.env.DISCORD_TOKEN);
 
   try {
     await rest.put(
@@ -423,7 +476,9 @@ client.once("ready", async () => {
         process.env.GUILD_ID
       ),
       {
-        body: commands.map(command => command.toJSON())
+        body: commands.map(command =>
+          command.toJSON()
+        )
       }
     );
 
@@ -433,12 +488,15 @@ client.once("ready", async () => {
   }
 });
 
+// INTERACTIONS
+
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
   if (!interaction.guild) return;
 
   try {
-    // LINEUP COMMANDS
+
+    // LINEUP
 
     if (interaction.commandName === "lineup") {
       const action = interaction.options.getSubcommand();
@@ -451,20 +509,20 @@ client.on("interactionCreate", async interaction => {
 
         if (!/^[A-Z]{2}$/.test(code)) {
           return interaction.reply({
-            content: "Please provide a valid two-letter country code, such as PL or FR.",
+            content: "Enter a valid two-letter country code.",
             ephemeral: true
           });
         }
 
-        const countryName = getCountryName(code);
+        const country = getCountryName(code);
 
         if (
-          !countryName ||
-          countryName === code ||
-          countryName === "Unknown Region"
+          !country ||
+          country === code ||
+          country === "Unknown Region"
         ) {
           return interaction.reply({
-            content: "That country code could not be recognised.",
+            content: "That country code is not recognised.",
             ephemeral: true
           });
         }
@@ -473,24 +531,27 @@ client.on("interactionCreate", async interaction => {
         saveData();
 
         return interaction.reply({
-          content: `${getFlag(code)} Your country has been registered as **${countryName}**.`,
+          content: `${getFlag(code)} Your country is now registered as **${country}**.`,
           ephemeral: true
         });
       }
 
       if (action === "mycountry") {
-        const target = interaction.options.getUser("player") || interaction.user;
-        const code = getCountryCode(target.id);
+        const user =
+          interaction.options.getUser("player") ||
+          interaction.user;
+
+        const code = getCountryCode(user.id);
 
         if (!code) {
           return interaction.reply({
-            content: `${target} has not registered a country yet. Use \`/lineup setcountry\`.`,
+            content: `${user} has not registered a country. Use \`/lineup setcountry\`.`,
             ephemeral: true
           });
         }
 
         return interaction.reply({
-          content: `${getFlag(code)} **${target.username}** • ${getCountryName(code)} (\`${code}\`)`,
+          content: `${getFlag(code)} **${user.username}** • ${getCountryName(code)}`,
           ephemeral: true
         });
       }
@@ -502,31 +563,45 @@ client.on("interactionCreate", async interaction => {
           .getString("formation")
           .trim();
 
-        const rawPlayers = interaction.options.getString("players");
-        const rawBench = interaction.options.getString("bench") || "";
-
         if (formation.length > 30) {
-          return interaction.editReply("Formation name is too long.");
-        }
-
-        const players = parseCustomPlayers(rawPlayers);
-        const bench = extractMentions(rawBench);
-
-        if (players.length < 1 || players.length > 11) {
           return interaction.editReply(
-            "A lineup must contain between 1 and 11 starting players."
+            "Formation name must be under 30 characters."
           );
         }
 
-        if (new Set([...players.map(p => p.userId), ...bench]).size !== players.length + bench.length) {
+        const players = collectPlayers(
+          interaction,
+          11,
+          true
+        );
+
+        const benchText =
+          interaction.options.getString("bench") || "";
+
+        const bench = [
+          ...benchText.matchAll(/<@!?(\d+)>/g)
+        ].map(match => match[1]);
+
+        if (!players.length || players.length > 11) {
           return interaction.editReply(
-            "A player cannot appear twice in the starting lineup or bench."
+            "Select between 1 and 11 starting players."
+          );
+        }
+
+        const allIds = [
+          ...players.map(player => player.userId),
+          ...bench
+        ];
+
+        if (new Set(allIds).size !== allIds.length) {
+          return interaction.editReply(
+            "A player cannot appear twice in the lineup or bench."
           );
         }
 
         await validatePlayers(
           interaction.guild,
-          [...players.map(p => p.userId), ...bench]
+          allIds
         );
 
         const embed = createLineupEmbed(
@@ -535,39 +610,42 @@ client.on("interactionCreate", async interaction => {
           bench
         );
 
-        const mentions = getMentions(players);
-
         return interaction.editReply({
-          content: `**STARTING LINEUP**\n${mentions}`,
+          content:
+            `**STARTING LINEUP**\n${getMentions(players)}`,
           embeds: [embed],
           allowedMentions: {
-            users: players.map(p => p.userId)
+            users: players.map(player => player.userId)
           }
         });
       }
     }
 
-    // FRIENDLY COMMAND
+    // FRIENDLY
 
     if (interaction.commandName === "friendly") {
       await interaction.deferReply();
 
       const format = interaction.options.getString("format");
-      const rawPlayers = interaction.options.getString("players");
-      const rawBench = interaction.options.getString("bench") || "";
-
       const positions = FRIENDLY_POSITIONS[format];
 
-      if (!positions) {
-        return interaction.editReply("Invalid friendly format.");
-      }
-
-      const players = parseFriendlyPlayers(
-        rawPlayers,
-        positions
+      const players = collectPlayers(
+        interaction,
+        9,
+        false
       );
 
-      const bench = extractMentions(rawBench);
+      const bench = collectBench(interaction);
+
+      if (players.length !== positions.length) {
+        return interaction.editReply(
+          `${format} requires exactly ${positions.length} starting players. You selected ${players.length}.`
+        );
+      }
+
+      players.forEach((player, index) => {
+        player.position = positions[index];
+      });
 
       const allIds = [
         ...players.map(player => player.userId),
@@ -580,7 +658,10 @@ client.on("interactionCreate", async interaction => {
         );
       }
 
-      await validatePlayers(interaction.guild, allIds);
+      await validatePlayers(
+        interaction.guild,
+        allIds
+      );
 
       const friendly = {
         format,
@@ -593,10 +674,22 @@ client.on("interactionCreate", async interaction => {
       data.friendlies[interaction.guild.id] = friendly;
       saveData();
 
-      return sendFriendly(interaction, friendly);
+      return interaction.editReply({
+        content:
+          `**STARTING LINEUP**\n${getMentions(players)}`,
+        embeds: [
+          createFriendlyEmbed(
+            friendly,
+            interaction.guild
+          )
+        ],
+        allowedMentions: {
+          users: players.map(player => player.userId)
+        }
+      });
     }
 
-    // SUBSTITUTION COMMAND
+    // SUBSTITUTIONS
 
     if (interaction.commandName === "sub") {
       await interaction.deferReply();
@@ -605,16 +698,21 @@ client.on("interactionCreate", async interaction => {
 
       if (!friendly) {
         return interaction.editReply(
-          "There is no active friendly lineup. Create one using `/friendly` first."
+          "There is no active friendly. Create one using `/friendly`."
         );
       }
 
+      const isManager =
+        interaction.memberPermissions?.has(
+          PermissionFlagsBits.ManageGuild
+        );
+
       if (
         friendly.createdBy !== interaction.user.id &&
-        !interaction.memberPermissions.has("ManageGuild")
+        !isManager
       ) {
         return interaction.editReply(
-          "Only the person who created the friendly lineup or a server manager can make substitutions."
+          "Only the friendly creator or a server manager can make substitutions."
         );
       }
 
@@ -623,7 +721,7 @@ client.on("interactionCreate", async interaction => {
 
       if (outgoing.id === incoming.id) {
         return interaction.editReply(
-          "The incoming and outgoing players must be different."
+          "Choose two different players."
         );
       }
 
@@ -633,11 +731,15 @@ client.on("interactionCreate", async interaction => {
 
       if (outgoingIndex === -1) {
         return interaction.editReply(
-          `${outgoing} is not currently in the starting lineup.`
+          `${outgoing} is not in the starting lineup.`
         );
       }
 
-      if (friendly.players.some(player => player.userId === incoming.id)) {
+      if (
+        friendly.players.some(
+          player => player.userId === incoming.id
+        )
+      ) {
         return interaction.editReply(
           `${incoming} is already playing.`
         );
@@ -648,13 +750,14 @@ client.on("interactionCreate", async interaction => {
         [outgoing.id, incoming.id]
       );
 
-      const incomingBenchIndex = friendly.bench.indexOf(incoming.id);
+      const benchIndex = friendly.bench.indexOf(incoming.id);
 
-      if (incomingBenchIndex !== -1) {
-        friendly.bench.splice(incomingBenchIndex, 1);
+      if (benchIndex !== -1) {
+        friendly.bench.splice(benchIndex, 1);
       }
 
-      const position = friendly.players[outgoingIndex].position;
+      const position =
+        friendly.players[outgoingIndex].position;
 
       friendly.players[outgoingIndex] = {
         position,
@@ -673,13 +776,13 @@ client.on("interactionCreate", async interaction => {
 
       return interaction.editReply({
         content:
-          `**SUBSTITUTION COMPLETE**\n` +
-          `${getFlag(getCountryCode(outgoing.id))} ${outgoing} → OUT\n` +
-          `${getFlag(getCountryCode(incoming.id))} ${incoming} → IN\n\n` +
-          `**UPDATED STARTING LINEUP**\n${getMentions(friendly.players)}`,
+          `**SUBSTITUTION COMPLETE**\n\n` +
+          `${getPlayerLabel(outgoing.id, "OUT")}\n` +
+          `${getPlayerLabel(incoming.id, "IN")}\n\n` +
+          `**UPDATED LINEUP**\n${getMentions(friendly.players)}`,
         embeds: [embed],
         allowedMentions: {
-          users: friendly.players.map(p => p.userId)
+          users: friendly.players.map(player => player.userId)
         }
       });
     }
@@ -687,7 +790,8 @@ client.on("interactionCreate", async interaction => {
   } catch (error) {
     console.error("Interaction error:", error);
 
-    const message = error.message || "An unexpected error occurred.";
+    const message = error.message ||
+      "An unexpected error occurred.";
 
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply({
@@ -743,7 +847,9 @@ client.on("messageCreate", async message => {
         inline: true
       }
     )
-    .setThumbnail(message.guild.iconURL({ size: 256 }))
+    .setThumbnail(
+      message.guild.iconURL({ size: 256 })
+    )
     .setFooter({
       text: "Puppet • At your service"
     })
@@ -758,12 +864,18 @@ client.on("messageCreate", async message => {
   }
 });
 
+// STARTUP
+
 if (!process.env.DISCORD_TOKEN) {
-  throw new Error("Missing DISCORD_TOKEN in environment variables.");
+  throw new Error("Missing DISCORD_TOKEN.");
 }
 
-if (!process.env.CLIENT_ID || !process.env.GUILD_ID) {
-  throw new Error("Missing CLIENT_ID or GUILD_ID in environment variables.");
+if (!process.env.CLIENT_ID) {
+  throw new Error("Missing CLIENT_ID.");
+}
+
+if (!process.env.GUILD_ID) {
+  throw new Error("Missing GUILD_ID.");
 }
 
 loadData();
