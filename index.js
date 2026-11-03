@@ -148,6 +148,10 @@ function playerLabel(player) {
   return `${getFlag(getCountryCode(player.userId))} **${player.position}** — <@${player.userId}>`;
 }
 
+function getMentions(players) {
+    return players.map(player => `<@${player.userId}>`).join(" ");
+}
+
 // COLLECT POSITION-NAMED PLAYERS
 
 function collectNamedPlayers(interaction, slots) {
