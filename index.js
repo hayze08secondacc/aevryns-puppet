@@ -29,14 +29,7 @@ const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, "puppet-data.jso
 
 const COLORS = {
   main: "#8B5CF6",
-  friendly: "#2563EB",
-  success: "#22C55E",
-  error: "#EF4444"
-};
-
-const FRIENDLY_POSITIONS = {
-  "8v8": ["ST", "ST", "LM", "RM", "LB", "CB", "RB", "GK"],
-  "9v9": ["ST", "ST", "LM", "CM", "RM", "LB", "CB", "RB", "GK"]
+  friendly: "#2563EB"
 };
 
 let data = {
@@ -44,7 +37,48 @@ let data = {
   friendlies: {}
 };
 
-// DATA STORAGE
+const CUSTOM_SLOTS = [
+  { key: "gk", pos: "GK", description: "Goalkeeper" },
+  { key: "lb", pos: "LB", description: "Left back" },
+  { key: "lwb", pos: "LWB", description: "Left wing back" },
+  { key: "cb1", pos: "CB", description: "First centre back" },
+  { key: "cb2", pos: "CB", description: "Second centre back" },
+  { key: "cb3", pos: "CB", description: "Third centre back" },
+  { key: "rb", pos: "RB", description: "Right back" },
+  { key: "rwb", pos: "RWB", description: "Right wing back" },
+  { key: "lm", pos: "LM", description: "Left midfielder" },
+  { key: "cm1", pos: "CM", description: "First central midfielder" },
+  { key: "cm2", pos: "CM", description: "Second central midfielder" },
+  { key: "cdm", pos: "CDM", description: "Defensive midfielder" },
+  { key: "cam", pos: "CAM", description: "Attacking midfielder" },
+  { key: "rm", pos: "RM", description: "Right midfielder" },
+  { key: "lw", pos: "LW", description: "Left winger" },
+  { key: "st1", pos: "ST", description: "First striker" },
+  { key: "st2", pos: "ST", description: "Second striker" },
+  { key: "rw", pos: "RW", description: "Right winger" }
+];
+
+const FRIENDLY_SLOTS = [
+  { key: "st1", pos: "ST", description: "First striker" },
+  { key: "st2", pos: "ST", description: "Second striker" },
+  { key: "lm", pos: "LM", description: "Left midfielder" },
+  { key: "cm", pos: "CM", description: "Central midfielder (9v9)" },
+  { key: "rm", pos: "RM", description: "Right midfielder" },
+  { key: "lb", pos: "LB", description: "Left back" },
+  { key: "cb", pos: "CB", description: "Centre back" },
+  { key: "rb", pos: "RB", description: "Right back" },
+  { key: "gk", pos: "GK", description: "Goalkeeper" }
+];
+
+const PITCH_ROWS = [
+  ["LW", "ST", "ST", "RW"],
+  ["LM", "CAM", "RM"],
+  ["CDM", "CM", "CM"],
+  ["LWB", "LB", "CB", "CB", "CB", "RB", "RWB"],
+  ["GK"]
+];
+
+// STORAGE
 
 function loadData() {
   try {
@@ -84,8 +118,8 @@ function saveData() {
 
 // COUNTRIES
 
-function getCountryCode(userId) {
-  return data.countries[userId] || null;
+function getCountryCode(id) {
+  return data.countries[id] || null;
 }
 
 function getCountryName(code) {
@@ -110,73 +144,42 @@ function getFlag(code) {
   );
 }
 
-function getPlayerLabel(userId, position) {
-  const code = getCountryCode(userId);
-  const flag = getFlag(code);
-
-  return `${flag} **${position}** — <@${userId}>`;
+function playerLabel(player) {
+  return `${getFlag(getCountryCode(player.userId))} **${player.position}** — <@${player.userId}>`;
 }
 
-// PLAYER SELECTION
+// COLLECT POSITION-NAMED PLAYERS
 
-function collectPlayers(interaction, max, positionMode) {
+function collectNamedPlayers(interaction, slots) {
   const players = [];
-  let gapFound = false;
 
-  for (let i = 1; i <= max; i++) {
-    const user = interaction.options.getUser(`player${i}`);
+  for (const slot of slots) {
+    const user = interaction.options.getUser(slot.key);
 
-    if (!user) {
-      gapFound = true;
-      continue;
+    if (user) {
+      players.push({
+        userId: user.id,
+        position: slot.pos
+      });
     }
-
-    if (gapFound) {
-      throw new Error(
-        `Player ${i} is selected while an earlier player slot is empty. Fill player slots in order.`
-      );
-    }
-
-    let position = `P${i}`;
-
-    if (positionMode) {
-      position =
-        interaction.options.getString(`position${i}`) ||
-        `P${i}`;
-
-      position = position.trim().toUpperCase();
-
-      if (!/^[A-Z0-9+/-]{1,10}$/.test(position)) {
-        throw new Error(`Invalid position for player ${i}.`);
-      }
-    }
-
-    players.push({
-      userId: user.id,
-      position
-    });
   }
 
-  const ids = players.map(player => player.userId);
+  const ids = players.map(p => p.userId);
 
   if (new Set(ids).size !== ids.length) {
-    throw new Error(
-      "You cannot select the same player twice."
-    );
+    throw new Error("You cannot select the same player twice.");
   }
 
   return players;
 }
 
-function collectBench(interaction, max = 5) {
+function collectBench(interaction) {
   const bench = [];
 
-  for (let i = 1; i <= max; i++) {
+  for (let i = 1; i <= 5; i++) {
     const user = interaction.options.getUser(`bench${i}`);
 
-    if (user) {
-      bench.push(user.id);
-    }
+    if (user) bench.push(user.id);
   }
 
   if (new Set(bench).size !== bench.length) {
@@ -201,20 +204,71 @@ async function validatePlayers(guild, ids) {
 
   if (missing.length) {
     throw new Error(
-      `These players are not in this server: ${missing.map(id => `<@${id}>`).join(", ")}`
+      `Players not found in this server: ${missing.map(id => `<@${id}>`).join(", ")}`
     );
   }
 }
 
-// EMBEDS
+// PITCH VISUAL
 
-function getMentions(players) {
-  return players
-    .map(player => `<@${player.userId}>`)
-    .join(" ");
+function createPitch(guild, players) {
+  const rows = [];
+
+  for (const positions of PITCH_ROWS) {
+    const rowPlayers = [];
+
+    for (const position of positions) {
+      const index = players.findIndex(
+        (player, i) =>
+          player.position === position &&
+          !rowPlayers.some(item => item.index === i)
+      );
+
+      if (index !== -1) {
+        const player = players[index];
+        const member = guild.members.cache.get(player.userId);
+        const name = (
+          member?.displayName ||
+          member?.user.username ||
+          "Player"
+        ).slice(0, 9);
+
+        rowPlayers.push({
+          index,
+          text: `${getFlag(getCountryCode(player.userId))} ${name}`
+        });
+      }
+    }
+
+    if (rowPlayers.length) {
+      rows.push(
+        rowPlayers.map(item => item.text).join("   ")
+      );
+    }
+  }
+
+  const width = Math.max(
+    24,
+    ...rows.map(row => row.length)
+  );
+
+  const border = "┌" + "─".repeat(width + 2) + "┐";
+  const bottom = "└" + "─".repeat(width + 2) + "┘";
+
+  const body = rows.map(row =>
+    "│ " + row.padEnd(width) + " │"
+  );
+
+  return [
+    border,
+    ...body,
+    bottom
+  ].join("\n");
 }
 
-function createLineupEmbed(formation, players, bench) {
+// EMBEDS
+
+function createLineupEmbed(guild, formation, players, bench) {
   const embed = new EmbedBuilder()
     .setColor(COLORS.main)
     .setAuthor({
@@ -223,12 +277,10 @@ function createLineupEmbed(formation, players, bench) {
     })
     .setTitle(`✦ ${formation} Formation`)
     .setDescription(
-      players.map(player =>
-        getPlayerLabel(
-          player.userId,
-          player.position
-        )
-      ).join("\n")
+      "```text\n" +
+      createPitch(guild, players) +
+      "\n```\n" +
+      players.map(playerLabel).join("\n")
     )
     .addFields(
       {
@@ -237,22 +289,25 @@ function createLineupEmbed(formation, players, bench) {
         inline: true
       },
       {
-        name: "STARTING XI",
-        value: `\`${players.length}\``,
+        name: "STARTING PLAYERS",
+        value: `\`${players.length}/11\``,
         inline: true
       }
     )
     .setURL("https://www.buildlineup.com/")
     .setFooter({
-      text: "Puppet • BuildLineup Generator"
+      text: "Puppet • Football Lineup Generator"
     })
     .setTimestamp();
 
   if (bench.length) {
     embed.addFields({
       name: `SUBSTITUTES • ${bench.length}`,
-      value: bench.map((id, i) =>
-        getPlayerLabel(id, `SUB ${i + 1}`)
+      value: bench.map((id, index) =>
+        playerLabel({
+          userId: id,
+          position: `SUB ${index + 1}`
+        })
       ).join("\n")
     });
   }
@@ -265,10 +320,11 @@ function createLineupEmbed(formation, players, bench) {
   return embed;
 }
 
-function createFriendlyEmbed(friendly, guild) {
-  const shape = friendly.format === "8v8"
-    ? "2-2-3"
-    : "2-3-3";
+function createFriendlyEmbed(guild, friendly) {
+  const pitch = createPitch(
+    guild,
+    friendly.players
+  );
 
   const embed = new EmbedBuilder()
     .setColor(COLORS.friendly)
@@ -278,43 +334,40 @@ function createFriendlyEmbed(friendly, guild) {
     })
     .setTitle(`✦ ${friendly.format} Friendly`)
     .setDescription(
-      friendly.players.map(player =>
-        getPlayerLabel(
-          player.userId,
-          player.position
-        )
-      ).join("\n")
+      "```text\n" +
+      pitch +
+      "\n```\n" +
+      friendly.players.map(playerLabel).join("\n")
     )
     .addFields(
       {
-        name: "FORMATION",
-        value: `\`${shape}\``,
+        name: "FORMAT",
+        value: `\`${friendly.format}\``,
         inline: true
       },
       {
-        name: "STARTING PLAYERS",
+        name: "STARTING XI",
         value: `\`${friendly.players.length}/${friendly.players.length}\``,
         inline: true
-      },
-      {
-        name: "SUBSTITUTIONS",
-        value: "Use `/sub` to replace a player. The outgoing player moves to the bench."
       }
     );
 
-  if (friendly.bench.length) {
-    embed.addFields({
-      name: `BENCH • ${friendly.bench.length}`,
-      value: friendly.bench.map((id, i) =>
-        getPlayerLabel(id, `SUB ${i + 1}`)
-      ).join("\n")
-    });
-  } else {
-    embed.addFields({
-      name: "BENCH",
-      value: "No substitutes registered."
-    });
-  }
+  embed.addFields({
+    name: `SUBSTITUTES • ${friendly.bench.length}`,
+    value: friendly.bench.length
+      ? friendly.bench.map((id, index) =>
+          playerLabel({
+            userId: id,
+            position: `SUB ${index + 1}`
+          })
+        ).join("\n")
+      : "No substitutes."
+  });
+
+  embed.addFields({
+    name: "MATCH MANAGEMENT",
+    value: "Use `/sub` to make substitutions."
+  });
 
   embed.setFooter({
     text: `${guild.name} • Puppet Friendly Manager`
@@ -325,16 +378,16 @@ function createFriendlyEmbed(friendly, guild) {
   return embed;
 }
 
-// SLASH COMMANDS
+// COMMAND BUILDERS
 
-const lineupCommand = new SlashCommandBuilder()
+const lineup = new SlashCommandBuilder()
   .setName("lineup")
   .setDescription("Create and manage football lineups")
 
   .addSubcommand(sub =>
     sub
       .setName("create")
-      .setDescription("Build a custom football lineup")
+      .setDescription("Create a custom football formation")
 
       .addStringOption(option =>
         option
@@ -352,7 +405,7 @@ const lineupCommand = new SlashCommandBuilder()
       .addStringOption(option =>
         option
           .setName("country")
-          .setDescription("Two-letter country code, e.g. PL, FR, MA")
+          .setDescription("Country code: PL, FR, MA, ZA")
           .setRequired(true)
       )
   )
@@ -360,7 +413,7 @@ const lineupCommand = new SlashCommandBuilder()
   .addSubcommand(sub =>
     sub
       .setName("mycountry")
-      .setDescription("Check your registered country")
+      .setDescription("Check a registered country")
 
       .addUserOption(option =>
         option
@@ -369,46 +422,36 @@ const lineupCommand = new SlashCommandBuilder()
       )
   );
 
-// Add individual player and position selectors.
-
-const createSubcommand = lineupCommand.options.find(
+const create = lineup.options.find(
   option => option.name === "create"
 );
 
-for (let i = 1; i <= 11; i++) {
-  createSubcommand.addUserOption(option =>
+for (const slot of CUSTOM_SLOTS) {
+  create.addUserOption(option =>
     option
-      .setName(`player${i}`)
-      .setDescription(`Starting player ${i}`)
-      .setRequired(i === 1)
+      .setName(slot.key)
+      .setDescription(`Select ${slot.description}`)
   );
 }
 
-for (let i = 1; i <= 11; i++) {
-  createSubcommand.addStringOption(option =>
+for (let i = 1; i <= 5; i++) {
+  create.addUserOption(option =>
     option
-      .setName(`position${i}`)
-      .setDescription(`Position for player ${i}, e.g. ST, CB, GK`)
-      .setRequired(false)
+      .setName(`bench${i}`)
+      .setDescription(`Substitute ${i}`)
   );
 }
-
-createSubcommand.addStringOption(option =>
-  option
-    .setName("bench")
-    .setDescription("Optional substitute mentions separated by spaces")
-);
 
 // FRIENDLY COMMAND
 
-const friendlyCommand = new SlashCommandBuilder()
+const friendly = new SlashCommandBuilder()
   .setName("friendly")
   .setDescription("Create an 8v8 or 9v9 friendly")
 
   .addStringOption(option =>
     option
       .setName("format")
-      .setDescription("Friendly format")
+      .setDescription("Choose your friendly format")
       .setRequired(true)
       .addChoices(
         { name: "8v8", value: "8v8" },
@@ -416,17 +459,16 @@ const friendlyCommand = new SlashCommandBuilder()
       )
   );
 
-for (let i = 1; i <= 9; i++) {
-  friendlyCommand.addUserOption(option =>
+for (const slot of FRIENDLY_SLOTS) {
+  friendly.addUserOption(option =>
     option
-      .setName(`player${i}`)
-      .setDescription(`Starting player ${i}`)
-      .setRequired(i === 1)
+      .setName(slot.key)
+      .setDescription(`Select ${slot.description}`)
   );
 }
 
 for (let i = 1; i <= 5; i++) {
-  friendlyCommand.addUserOption(option =>
+  friendly.addUserOption(option =>
     option
       .setName(`bench${i}`)
       .setDescription(`Substitute ${i}`)
@@ -435,31 +477,31 @@ for (let i = 1; i <= 5; i++) {
 
 // SUB COMMAND
 
-const subCommand = new SlashCommandBuilder()
+const sub = new SlashCommandBuilder()
   .setName("sub")
-  .setDescription("Substitute a player in the active friendly")
+  .setDescription("Make a friendly substitution")
 
   .addUserOption(option =>
     option
       .setName("outgoing")
-      .setDescription("Player leaving the pitch")
+      .setDescription("Player leaving")
       .setRequired(true)
   )
 
   .addUserOption(option =>
     option
       .setName("incoming")
-      .setDescription("Player entering the pitch")
+      .setDescription("Player entering")
       .setRequired(true)
   );
 
-const commands = [
-  lineupCommand,
-  friendlyCommand,
-  subCommand
-];
+// REGISTER
 
-// REGISTER COMMANDS
+const commands = [
+  lineup,
+  friendly,
+  sub
+];
 
 client.once("ready", async () => {
   console.log(`Puppet is online as ${client.user.tag}`);
@@ -482,9 +524,9 @@ client.once("ready", async () => {
       }
     );
 
-    console.log("Puppet slash commands registered.");
+    console.log("All Puppet commands registered.");
   } catch (error) {
-    console.error("Command registration error:", error);
+    console.error("Registration error:", error);
   }
 });
 
@@ -514,15 +556,15 @@ client.on("interactionCreate", async interaction => {
           });
         }
 
-        const country = getCountryName(code);
+        const name = getCountryName(code);
 
         if (
-          !country ||
-          country === code ||
-          country === "Unknown Region"
+          !name ||
+          name === code ||
+          name === "Unknown Region"
         ) {
           return interaction.reply({
-            content: "That country code is not recognised.",
+            content: "Country not recognised.",
             ephemeral: true
           });
         }
@@ -531,7 +573,7 @@ client.on("interactionCreate", async interaction => {
         saveData();
 
         return interaction.reply({
-          content: `${getFlag(code)} Your country is now registered as **${country}**.`,
+          content: `${getFlag(code)} Your country is now **${name}**.`,
           ephemeral: true
         });
       }
@@ -545,13 +587,13 @@ client.on("interactionCreate", async interaction => {
 
         if (!code) {
           return interaction.reply({
-            content: `${user} has not registered a country. Use \`/lineup setcountry\`.`,
+            content: `${user} has not registered a country.`,
             ephemeral: true
           });
         }
 
         return interaction.reply({
-          content: `${getFlag(code)} **${user.username}** • ${getCountryName(code)}`,
+          content: `${getFlag(code)} **${user.username}** — ${getCountryName(code)}`,
           ephemeral: true
         });
       }
@@ -565,22 +607,16 @@ client.on("interactionCreate", async interaction => {
 
         if (formation.length > 30) {
           return interaction.editReply(
-            "Formation name must be under 30 characters."
+            "Formation name is too long."
           );
         }
 
-        const players = collectPlayers(
+        const players = collectNamedPlayers(
           interaction,
-          11,
-          true
+          CUSTOM_SLOTS
         );
 
-        const benchText =
-          interaction.options.getString("bench") || "";
-
-        const bench = [
-          ...benchText.matchAll(/<@!?(\d+)>/g)
-        ].map(match => match[1]);
+        const bench = collectBench(interaction);
 
         if (!players.length || players.length > 11) {
           return interaction.editReply(
@@ -588,12 +624,12 @@ client.on("interactionCreate", async interaction => {
           );
         }
 
-        const allIds = [
-          ...players.map(player => player.userId),
+        const ids = [
+          ...players.map(p => p.userId),
           ...bench
         ];
 
-        if (new Set(allIds).size !== allIds.length) {
+        if (new Set(ids).size !== ids.length) {
           return interaction.editReply(
             "A player cannot appear twice in the lineup or bench."
           );
@@ -601,10 +637,11 @@ client.on("interactionCreate", async interaction => {
 
         await validatePlayers(
           interaction.guild,
-          allIds
+          ids
         );
 
         const embed = createLineupEmbed(
+          interaction.guild,
           formation,
           players,
           bench
@@ -615,7 +652,7 @@ client.on("interactionCreate", async interaction => {
             `**STARTING LINEUP**\n${getMentions(players)}`,
           embeds: [embed],
           allowedMentions: {
-            users: players.map(player => player.userId)
+            users: players.map(p => p.userId)
           }
         });
       }
@@ -627,43 +664,48 @@ client.on("interactionCreate", async interaction => {
       await interaction.deferReply();
 
       const format = interaction.options.getString("format");
-      const positions = FRIENDLY_POSITIONS[format];
 
-      const players = collectPlayers(
+      const players = collectNamedPlayers(
         interaction,
-        9,
-        false
+        FRIENDLY_SLOTS
       );
 
       const bench = collectBench(interaction);
 
-      if (players.length !== positions.length) {
+      const expected = format === "8v8" ? 8 : 9;
+
+      if (players.length !== expected) {
         return interaction.editReply(
-          `${format} requires exactly ${positions.length} starting players. You selected ${players.length}.`
+          `${format} requires exactly ${expected} starting players. You selected ${players.length}.`
         );
       }
 
-      players.forEach((player, index) => {
-        player.position = positions[index];
-      });
+      if (
+        format === "8v8" &&
+        players.some(player => player.position === "CM")
+      ) {
+        return interaction.editReply(
+          "8v8 does not use the CM position."
+        );
+      }
 
-      const allIds = [
-        ...players.map(player => player.userId),
+      const ids = [
+        ...players.map(p => p.userId),
         ...bench
       ];
 
-      if (new Set(allIds).size !== allIds.length) {
+      if (new Set(ids).size !== ids.length) {
         return interaction.editReply(
-          "A player cannot appear twice in the starting lineup or bench."
+          "A player cannot appear twice in the lineup or bench."
         );
       }
 
       await validatePlayers(
         interaction.guild,
-        allIds
+        ids
       );
 
-      const friendly = {
+      const friendlyData = {
         format,
         players,
         bench,
@@ -671,7 +713,7 @@ client.on("interactionCreate", async interaction => {
         createdAt: Date.now()
       };
 
-      data.friendlies[interaction.guild.id] = friendly;
+      data.friendlies[interaction.guild.id] = friendlyData;
       saveData();
 
       return interaction.editReply({
@@ -679,37 +721,36 @@ client.on("interactionCreate", async interaction => {
           `**STARTING LINEUP**\n${getMentions(players)}`,
         embeds: [
           createFriendlyEmbed(
-            friendly,
-            interaction.guild
+            interaction.guild,
+            friendlyData
           )
         ],
         allowedMentions: {
-          users: players.map(player => player.userId)
+          users: players.map(p => p.userId)
         }
       });
     }
 
-    // SUBSTITUTIONS
+    // SUBSTITUTION
 
     if (interaction.commandName === "sub") {
       await interaction.deferReply();
 
-      const friendly = data.friendlies[interaction.guild.id];
+      const current = data.friendlies[interaction.guild.id];
 
-      if (!friendly) {
+      if (!current) {
         return interaction.editReply(
-          "There is no active friendly. Create one using `/friendly`."
+          "There is no active friendly. Use `/friendly` first."
         );
       }
 
-      const isManager =
-        interaction.memberPermissions?.has(
-          PermissionFlagsBits.ManageGuild
-        );
+      const manager = interaction.memberPermissions?.has(
+        PermissionFlagsBits.ManageGuild
+      );
 
       if (
-        friendly.createdBy !== interaction.user.id &&
-        !isManager
+        current.createdBy !== interaction.user.id &&
+        !manager
       ) {
         return interaction.editReply(
           "Only the friendly creator or a server manager can make substitutions."
@@ -725,18 +766,18 @@ client.on("interactionCreate", async interaction => {
         );
       }
 
-      const outgoingIndex = friendly.players.findIndex(
+      const index = current.players.findIndex(
         player => player.userId === outgoing.id
       );
 
-      if (outgoingIndex === -1) {
+      if (index === -1) {
         return interaction.editReply(
           `${outgoing} is not in the starting lineup.`
         );
       }
 
       if (
-        friendly.players.some(
+        current.players.some(
           player => player.userId === incoming.id
         )
       ) {
@@ -750,39 +791,37 @@ client.on("interactionCreate", async interaction => {
         [outgoing.id, incoming.id]
       );
 
-      const benchIndex = friendly.bench.indexOf(incoming.id);
+      const benchIndex = current.bench.indexOf(incoming.id);
 
       if (benchIndex !== -1) {
-        friendly.bench.splice(benchIndex, 1);
+        current.bench.splice(benchIndex, 1);
       }
 
-      const position =
-        friendly.players[outgoingIndex].position;
+      const position = current.players[index].position;
 
-      friendly.players[outgoingIndex] = {
-        position,
-        userId: incoming.id
+      current.players[index] = {
+        userId: incoming.id,
+        position
       };
 
-      friendly.bench.push(outgoing.id);
+      current.bench.push(outgoing.id);
 
-      data.friendlies[interaction.guild.id] = friendly;
       saveData();
-
-      const embed = createFriendlyEmbed(
-        friendly,
-        interaction.guild
-      );
 
       return interaction.editReply({
         content:
           `**SUBSTITUTION COMPLETE**\n\n` +
-          `${getPlayerLabel(outgoing.id, "OUT")}\n` +
-          `${getPlayerLabel(incoming.id, "IN")}\n\n` +
-          `**UPDATED LINEUP**\n${getMentions(friendly.players)}`,
-        embeds: [embed],
+          `${playerLabel({ userId: outgoing.id, position: "OUT" })}\n` +
+          `${playerLabel({ userId: incoming.id, position: "IN" })}\n\n` +
+          `**UPDATED LINEUP**\n${getMentions(current.players)}`,
+        embeds: [
+          createFriendlyEmbed(
+            interaction.guild,
+            current
+          )
+        ],
         allowedMentions: {
-          users: friendly.players.map(player => player.userId)
+          users: current.players.map(p => p.userId)
         }
       });
     }
@@ -790,28 +829,26 @@ client.on("interactionCreate", async interaction => {
   } catch (error) {
     console.error("Interaction error:", error);
 
-    const message = error.message ||
-      "An unexpected error occurred.";
+    const response = {
+      content: `Something went wrong: ${error.message || "Unknown error"}`,
+      embeds: []
+    };
 
     if (interaction.deferred || interaction.replied) {
-      await interaction.editReply({
-        content: `Something went wrong: ${message}`,
-        embeds: []
-      }).catch(() => {});
+      await interaction.editReply(response).catch(() => {});
     } else {
       await interaction.reply({
-        content: `Something went wrong: ${message}`,
+        ...response,
         ephemeral: true
       }).catch(() => {});
     }
   }
 });
 
-// ORIGINAL MEMBERCOUNT COMMAND
+// MEMBER COUNT
 
 client.on("messageCreate", async message => {
-  if (message.author.bot) return;
-  if (!message.guild) return;
+  if (message.author.bot || !message.guild) return;
 
   const content = message.content.trim().toLowerCase();
 
