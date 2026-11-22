@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 
 const {
@@ -149,7 +148,7 @@ function playerLabel(player) {
 }
 
 function getMentions(players) {
-    return players.map(player => `<@${player.userId}>`).join(" ");
+  return players.map(player => `<@${player.userId}>`).join(" ");
 }
 
 // COLLECT POSITION-NAMED PLAYERS
@@ -382,6 +381,208 @@ function createFriendlyEmbed(guild, friendly) {
   return embed;
 }
 
+// RANK ROLE MANAGEMENT
+
+function normalizeRoleName(name) {
+  return name
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function findRankRole(guild, rank) {
+  const matches = guild.roles.cache.filter(role =>
+    normalizeRoleName(role.name).includes(rank)
+  );
+
+  if (matches.size === 0) {
+    throw new Error(
+      `I couldn't find a role containing **${rank.toUpperCase()}**. Make sure the rank role exists.`
+    );
+  }
+
+  if (matches.size > 1) {
+    throw new Error(
+      `I found multiple roles matching **${rank.toUpperCase()}**: ${matches.map(role => `\`${role.name}\``).join(", ")}. Rename them so only one role matches.`
+    );
+  }
+
+  return matches.first();
+}
+
+function getMemberRank(member) {
+  const ranks = ["d1", "d2", "d3", "d4"];
+  const matches = [];
+
+  for (const rank of ranks) {
+    const role = findRankRoleSafe(member.guild, rank);
+
+    if (role && member.roles.cache.has(role.id)) {
+      matches.push({ rank, role });
+    }
+  }
+
+  if (matches.length === 0) {
+    throw new Error(
+      `${member} doesn't have a D1, D2, D3 or D4 rank role.`
+    );
+  }
+
+  if (matches.length > 1) {
+    throw new Error(
+      `${member} has more than one D1-D4 rank role. Remove the extra rank role first.`
+    );
+  }
+
+  return matches[0];
+}
+
+function findRankRoleSafe(guild, rank) {
+  const matches = guild.roles.cache.filter(role =>
+    normalizeRoleName(role.name).includes(rank)
+  );
+
+  if (matches.size > 1) {
+    throw new Error(
+      `Multiple roles match **${rank.toUpperCase()}**: ${matches.map(role => `\`${role.name}\``).join(", ")}.`
+    );
+  }
+
+  return matches.first() || null;
+}
+
+async function changeMemberRank(interaction, direction) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)) {
+    throw new Error(
+      "You need the **Manage Roles** permission to use this command."
+    );
+  }
+
+  const guild = interaction.guild;
+
+  const botMember =
+    guild.members.me ||
+    await guild.members.fetch(client.user.id);
+
+  if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    throw new Error(
+      "I need the **Manage Roles** permission to change rank roles."
+    );
+  }
+
+  await guild.roles.fetch();
+
+  const user = interaction.options.getUser("user", true);
+  const amount = interaction.options.getInteger("amount", true);
+
+  const member = await guild.members.fetch(user.id).catch(() => null);
+
+  if (!member) {
+    throw new Error("That user is no longer in this server.");
+  }
+
+  if (member.id === guild.ownerId) {
+    throw new Error(
+      "The server owner's rank cannot be changed by this command."
+    );
+  }
+
+  if (interaction.user.id !== guild.ownerId) {
+    const actor = await guild.members.fetch(interaction.user.id);
+
+    if (
+      actor.roles.highest.comparePositionTo(
+        member.roles.highest
+      ) <= 0
+    ) {
+      throw new Error(
+        "You can only change the rank of members below your highest role."
+      );
+    }
+  }
+
+  const current = getMemberRank(member);
+
+  const order = ["d1", "d2", "d3", "d4"];
+
+  const currentIndex = order.indexOf(current.rank);
+
+  const nextIndex =
+    currentIndex +
+    (direction === "demote" ? amount : -amount);
+
+  if (nextIndex < 0 || nextIndex > 3) {
+    throw new Error(
+      direction === "demote"
+        ? `${member} is **${current.rank.toUpperCase()}**. They cannot be demoted ${amount} more ranks; D4 is the lowest rank.`
+        : `${member} is **${current.rank.toUpperCase()}**. They cannot be promoted ${amount} more ranks; D1 is the highest rank.`
+    );
+  }
+
+  const nextRank = order[nextIndex];
+  const nextRole = findRankRole(guild, nextRank);
+
+  if (nextRole.id === current.role.id) {
+    throw new Error(
+      "The current and destination rank roles are the same."
+    );
+  }
+
+  if (!current.role.editable || !nextRole.editable) {
+    throw new Error(
+      "I can't edit one of those roles. Move my bot role above both rank roles in Server Settings → Roles."
+    );
+  }
+
+  if (interaction.user.id !== guild.ownerId) {
+    const actor = await guild.members.fetch(interaction.user.id);
+
+    if (
+      nextRole.comparePositionTo(actor.roles.highest) >= 0
+    ) {
+      throw new Error(
+        "You cannot assign a role that is equal to or higher than your highest role."
+      );
+    }
+  }
+
+  await member.roles.add(
+    nextRole,
+    `${direction} by ${interaction.user.tag}`
+  );
+
+  try {
+    await member.roles.remove(
+      current.role,
+      `${direction} by ${interaction.user.tag}`
+    );
+  } catch (error) {
+    await member.roles.remove(
+      nextRole,
+      "Rollback after rank change failed"
+    ).catch(() => {});
+
+    throw new Error(
+      `I couldn't remove the old role, so I rolled back the new role. Check my role permissions and hierarchy. (${error.message})`
+    );
+  }
+
+  return {
+    content:
+      `**RANK ${direction.toUpperCase()} COMPLETE**\n\n` +
+      `**Member:** ${member}\n` +
+      `**Previous rank:** ${current.rank.toUpperCase()} — ${current.role}\n` +
+      `**New rank:** ${nextRank.toUpperCase()} — ${nextRole}\n` +
+      `**Change:** ${amount} rank${amount === 1 ? "" : "s"} ${direction === "demote" ? "down" : "up"}\n` +
+      `**Changed by:** ${interaction.user}`,
+    allowedMentions: {
+      users: [member.id],
+      roles: [current.role.id, nextRole.id]
+    }
+  };
+}
+
 // COMMAND BUILDERS
 
 const lineup = new SlashCommandBuilder()
@@ -499,12 +700,58 @@ const sub = new SlashCommandBuilder()
       .setRequired(true)
   );
 
+// PROMOTE / DEMOTE COMMANDS
+
+const demote = new SlashCommandBuilder()
+  .setName("demote")
+  .setDescription("Demote a member by 1 to 3 ranks")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+
+  .addUserOption(option =>
+    option
+      .setName("user")
+      .setDescription("Member to demote")
+      .setRequired(true)
+  )
+
+  .addIntegerOption(option =>
+    option
+      .setName("amount")
+      .setDescription("Number of ranks to demote")
+      .setRequired(true)
+      .setMinValue(1)
+      .setMaxValue(3)
+  );
+
+const promote = new SlashCommandBuilder()
+  .setName("promote")
+  .setDescription("Promote a member by 1 to 3 ranks")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+
+  .addUserOption(option =>
+    option
+      .setName("user")
+      .setDescription("Member to promote")
+      .setRequired(true)
+  )
+
+  .addIntegerOption(option =>
+    option
+      .setName("amount")
+      .setDescription("Number of ranks to promote")
+      .setRequired(true)
+      .setMinValue(1)
+      .setMaxValue(3)
+  );
+
 // REGISTER
 
 const commands = [
   lineup,
   friendly,
-  sub
+  sub,
+  demote,
+  promote
 ];
 
 client.once("ready", async () => {
@@ -828,6 +1075,24 @@ client.on("interactionCreate", async interaction => {
           users: current.players.map(p => p.userId)
         }
       });
+    }
+
+    // RANK MANAGEMENT
+
+    if (
+      interaction.commandName === "demote" ||
+      interaction.commandName === "promote"
+    ) {
+      await interaction.deferReply({
+        ephemeral: true
+      });
+
+      const result = await changeMemberRank(
+        interaction,
+        interaction.commandName
+      );
+
+      return interaction.editReply(result);
     }
 
   } catch (error) {
